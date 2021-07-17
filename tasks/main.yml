@@ -1,6 +1,7 @@
 ---
 
 - name: prepare rootless stuff if needed
+  tags: [ container_run_as_user, install_podman ]
   block:
 
     - name: get user information
@@ -25,17 +26,20 @@
   when: container_run_as_user != "root"
 
 - name: "Find uid of user"
+  tags: [ container_run_as_user, container_run_as_root, install_podman ]
   command: "id -u {{ container_run_as_user }}"
   register: container_run_as_uid
   check_mode: false  # Run even in check mode, to avoid fail with --check.
   changed_when: false
 
 - name: set systemd runtime dir
+  tags: [ container_run_as_user, container_run_as_root, install_podman ]
   set_fact:
     xdg_runtime_dir: "/run/user/{{ container_run_as_uid.stdout }}"
   changed_when: false
 
 - name: set systemd scope to system if needed
+  tags: [ container_run_as_user, container_run_as_root, install_podman]
   set_fact:
     systemd_scope: system
     service_files_dir: '/etc/systemd/system'
@@ -52,12 +56,14 @@
   block:
 
   - name: Check for user namespace support in kernel
+    tags: [ container_run_as_user]
     stat:
       path: /proc/sys/kernel/unprivileged_userns_clone
     register: unprivileged_userns_clone
     changed_when: false
 
   - name: Allow unprivileged users on Debian
+    tags: [ container_run_as_user]
     sysctl:
       name: kernel.unprivileged_userns_clone
       value: '1'
@@ -69,6 +75,7 @@
       - unprivileged_userns_clone.stat.exists
 
   - name: Install rootless dependencies on Debian-based
+    tags: [ container_run_as_user, install_podman ]
     package:
       name: "{{ podman_dependencies_rootless }}"
       state: present
@@ -77,6 +84,7 @@
       - container_run_as_user != 'root'
 
   - name: ensure podman is installed
+    tags: [ install_podman ]
     package:
       name: podman
       state: present
@@ -139,7 +147,7 @@
       password: "{{ container_image_password | default(omit) }}"
     become: true
     become_user: "{{ container_run_as_user }}"
-    when: container_image_list is defined and container_image_list | length > 1
+    when: container_image_list is defined and container_image_list | length > 1 or container_is_pod
     with_items: "{{ container_image_list }}"
 
   - name: if running pod, ensure configuration file exists
