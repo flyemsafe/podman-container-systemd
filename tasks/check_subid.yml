@@ -15,6 +15,7 @@
   when: container_run_as_group != 'root'
 
 - name: ensure user is in subuid file, if it was missing
+  become: yes
   lineinfile:
     path: /etc/subuid
     regexp: "^{{ container_run_as_user }}:.*"
@@ -26,6 +27,7 @@
   when: container_run_as_user != 'root' and not uid_line_found.matched
 
 - name: ensure group is in subgid file, if it was missing
+  become: yes
   lineinfile:
     path: /etc/subgid
     regexp: "^{{ container_run_as_group }}:.*"

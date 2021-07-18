@@ -1,0 +1,59 @@
+---
+- name: do cleanup stuff when container_state is "absent"
+  when: container_state == "absent"
+  tags: [ remove ]
+  block:
+
+  - name: ensure "{{ service_name }}" is disabled at boot
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    # become_method: machinectl
+    environment:
+      XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+    systemd:
+      name: "{{ service_name }}"
+      enabled: false
+      scope: "{{ systemd_scope }}"
+    when:
+      - service_file_before_template.stat.exists
+
+  - name: ensure "{{ service_name }}" is stopped
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    # become_method: machinectl
+    environment:
+      XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+    systemd:
+      name: "{{ service_name }}"
+      state: stopped
+      enabled: false
+      scope: "{{ systemd_scope }}"
+    when:
+      - service_file_before_template.stat.exists
+
+  - name: clean up systemd service file
+    file:
+      path: "{{ service_files_dir }}/{{ service_name }}"
+      state: absent
+    notify: reload systemctl
+
+#- name: Force all notified handlers to run at this point
+#  meta: flush_handlers
+
+  - name: Check if user is lingering
+    stat:
+      path: "/var/lib/systemd/linger/{{ container_run_as_user }}"
+    register: user_lingering
+    when: container_run_as_user != "root"
+
+  - name: Disable lingering (are we sure we want to do this always?)
+    command: "loginctl disable-linger {{ container_run_as_user }}"
+    when:
+      - container_run_as_user != "root"
+      - user_lingering.stat.exists
+
+  - name: clean up pod configuration file
+    file:
+      path: "{{ container_pod_yaml }}"
+      state: absent
+    when: container_pod_yaml is defined

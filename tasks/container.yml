@@ -1,0 +1,156 @@
+---
+- name: Configure systemd service and start the {{ container_name }} container or pod 
+  tags: [ configure_container_service ]
+  when: container_state == "running"
+  block:
+  - name: Check for user namespace support in kernel
+    tags: [ container_run_as_user]
+    stat:
+      path: /proc/sys/kernel/unprivileged_userns_clone
+    register: unprivileged_userns_clone
+    changed_when: false
+
+  - name: check user exists
+    user:
+      name: "{{ container_run_as_user }}"
+
+  - name: Check subuid & subgid
+    import_tasks: check_subid.yml
+
+  - name: running single container, get image Id if it exists and we are root
+    # XXX podman doesn't work through sudo for non root users,
+    # so skip preload if user
+    # https://github.com/containers/libpod/issues/5570
+    # command: podman inspect -f {{.Id}} "{{ container_image }}"
+    command: "podman image inspect -f '{{ '{{' }}.Id{{ '}}' }}' {{ item }}"
+    register: pre_pull_id #not in use
+    ignore_errors: true
+    when:
+      - container_image_list is defined
+      - container_image_list | length == 1
+      - container_run_as_user == 'root'
+    loop: "{{ container_image_list }}"
+
+  - name: Ensure container {{ container_name }} is running the latest image
+    containers.podman.podman_image:
+      name: "{{ item }}"
+      force: true
+      username: "{{ container_image_user | default(omit) }}"
+      password: "{{ container_image_password | default(omit) }}"
+    notify: restart service
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    when:
+      - container_image_list is defined
+      - container_image_list | length == 1
+      - container_run_as_user == 'root'
+    loop: "{{ container_image_list }}"
+
+  - name: running single container, get image Id if it exists
+    command:
+      "podman image inspect -f '{{ '{{' }}.Id{{ '}}' }}'  {{ item }}"
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    register: post_pull_id #not in use
+    ignore_errors: true
+    when:
+      - container_image_list is defined
+      - container_image_list | length == 1
+      - container_run_as_user == 'root'
+    loop: "{{ container_image_list }}"
+
+  - name: seems we use several container images, ensure all are up to date
+    containers.podman.podman_image:
+      name: "{{ item }}"
+      force: true
+      username: "{{ container_image_user | default(omit) }}"
+      password: "{{ container_image_password | default(omit) }}"
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    when: container_image_list is defined and container_image_list | length > 0
+    loop: "{{ container_image_list }}"
+
+  - name: If running pod, generate configuration file
+    stat:
+      path: "{{ container_pod_yaml }}"
+    register: pod_file
+    when: container_pod_yaml is defined
+
+  - name: Generate podman kube yaml
+    shell: podman generate kube {{ container_pod_name }} > {{ container_pod_yaml }}
+    check_mode: false  # Run even in check mode, to avoid fail with --check.
+    changed_when: false
+
+  - name: fail if pod configuration file is missing
+    fail:
+      msg: >
+        "Error: Asking to run pod, but pod definition yaml file is missing: "
+        "{{ container_pod_yaml }}"
+    when:
+      - container_pod_yaml is defined
+      - not pod_file.stat.exists
+
+  - name: Check if user is lingering
+    stat:
+      path: "/var/lib/systemd/linger/{{ container_run_as_user }}"
+    register: user_lingering
+    when: container_run_as_user != "root"
+
+  - name: Enable lingering is needed
+    command: "loginctl enable-linger {{ container_run_as_user }}"
+    when:
+      - container_run_as_user != "root"
+      - not user_lingering.stat.exists
+
+  - name: "create systemd service file for container: {{ container_name }}"
+    template:
+      src: systemd-service-single.j2
+      dest: "{{ service_files_dir }}/{{ service_name }}"
+      owner: "{{ container_run_as_user }}"
+      group: "{{ container_run_as_group }}"
+      mode: 0644
+    notify:
+      - reload systemctl
+      - start service
+      - enable service
+    register: service_file
+    when: (container_type != 'pod') and
+          (container_image_list is defined and container_image_list | length == 1)
+
+  - name: "create systemd service file for pod: {{ container_name }}"
+    template:
+      src: systemd-service-pod.j2
+      dest: "{{ service_files_dir }}/{{ service_name }}"
+      owner: "{{ container_run_as_user }}"
+      group: "{{ container_run_as_group }}"
+      mode: 0644
+    notify:
+      - reload systemctl
+      - start service
+      - enable service
+    register: service_file
+    when: (container_type == 'pod') or
+          (container_image_list is defined and container_image_list | length > 1)
+
+  - name: "ensure {{ service_name }} is restarted due config change"
+    debug: msg="config has changed:"
+    changed_when: true
+    notify: restart service
+    when:
+      - service_file_before_template.stat.exists
+      - service_file.changed
+
+  - name: ensure auto update is running for images
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    environment:
+      XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+    systemd:
+      name: podman-auto-update.timer
+      daemon_reload: true
+      scope: "{{ systemd_scope }}"
+      state: started
+      enabled: true
+
+- name: Force all notified handlers to run at this point
+  meta: flush_handlers
